@@ -15,10 +15,10 @@ const setRateLimitOnQueue = (tt, url, reset) => {
   queue.blockQueue(unblockIn);
 };
 
-const getRateLimits = async (tt) => {
+const getRateLimits = async (gt) => {
   const {
     resources,
-  } = await tt.get('/application/rate_limit_status', null, {
+  } = await gt.request('misc.getRateLimit', null, {
     retry: false,
     noWaitForReady: true,
   });
@@ -35,7 +35,7 @@ const getRateLimits = async (tt) => {
       if (reset && remaining < 1) {
         out[ep] = reset;
 
-        setRateLimitOnQueue(tt, ep, reset);
+        setRateLimitOnQueue(gt, ep, reset);
       }
 
       return out;

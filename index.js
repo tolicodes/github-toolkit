@@ -1,30 +1,24 @@
-const Twit = require('twit');
 const moment = require('moment');
+const Octokit = require('@octokit/rest');
+
+const { get } = require('lodash');
 
 const {
   createProgressBar,
   createQueue,
 } = require('api-toolkit');
 
-const getMentions = require('./helpers/getMentions');
-const getMentionedBy = require('./helpers/getMentionedBy');
-const getFollowing = require('./helpers/getFollowing');
-const getFollowers = require('./helpers/getFollowers');
-
 const { getRateLimits, setRateLimitOnQueue } = require('./utils/rateLimits');
-const paginate = require('./utils/paginate');
 
-const convertUserIdsToHandles = require('./helpers/convertUserIdsToHandles');
-
-// Allows us to check 180/ 15 minutes. Let's check at half that rate just in cases
-const RATE_LIMIT_AUTO_FETCH_INTERVAL = 15 * 60 * 1000 / 180 * 2;
+// We can check 5000 * per hour but we will limit it to every 10 seconds
+const RATE_LIMIT_AUTO_FETCH_INTERVAL = 10000;
 
 const ON_RATE_LIMIT_TIMEOUT = RATE_LIMIT_AUTO_FETCH_INTERVAL;
 
 // how many pending requests can we have per endpoint
 const MAX_CONCURRENT_FETCH = 2;
 
-module.exports = class TwitterToolkit {
+module.exports = class GithubToolkit {
   constructor(opts) {
     // because constructor can't be async
     this.init(opts);
@@ -33,11 +27,9 @@ module.exports = class TwitterToolkit {
   async init({
     autoFetchRateLimits = true,
     showProgressBar = true,
+    progressBar,
     auth: {
-      consumerKey,
-      consumerSecret,
-      accessToken,
-      accessTokenSecret,
+      token,
     },
   }) {
     let readyResolver;
@@ -51,25 +43,21 @@ module.exports = class TwitterToolkit {
     // holds rate limits
     this.rateLimits = {};
 
-    this.client = new Twit({
-      consumer_key: consumerKey,
-      consumer_secret: consumerSecret,
-      access_token: accessToken,
-      access_token_secret: accessTokenSecret,
+    this.client = Octokit();
+    this.client.authenticate({
+      type: 'token',
+      token,
     });
 
-    this.paginate = paginate.bind(null, this);
     this.getRateLimits = getRateLimits.bind(null, this);
     this.setRateLimitOnQueue = setRateLimitOnQueue.bind(null, this);
-
-    this.initHelpers();
 
     if (autoFetchRateLimits) {
       this.initRateLimitsAutoFetch();
     }
 
     if (showProgressBar) {
-      this.progressBar = createProgressBar({
+      this.progressBar = progressBar || createProgressBar({
         queues: this.queues,
       });
     }
@@ -85,6 +73,7 @@ module.exports = class TwitterToolkit {
       retry: true,
       maxRetries: 3,
     }).on('all', () => {
+      if (!this.progressBar) return;
       this.progressBar.update();
     });
 
@@ -95,76 +84,53 @@ module.exports = class TwitterToolkit {
     }
   }
 
-  get(url, params, opts) {
-    return this.request('get', url, params, opts);
-  }
-
-  post(url, params, opts) {
-    return this.request('post', url, params, opts);
-  }
-
-  delete(url, params, opts) {
-    return this.request('delete', url, params, opts);
-  }
-
-  update(url, params, opts) {
-    return this.request('update', url, params, opts);
-  }
-
-  async request(method, url, params, { noWaitForReady, retry } = {}) {
+  async request(method, params, { noWaitForReady, retry } = {}) {
     // ex: that first rate limits request
     if (!noWaitForReady) {
       // make sure we are ready
       await this.ready;
     }
 
-    if (!this.queues[url]) {
-      this.createQueue(url);
+    if (!this.queues[method]) {
+      this.createQueue(method);
     }
 
-    return this.queues[url].add(async () => {
+    return this.queues[method].add(async () => {
       try {
-        return (await this.client[method](url, params)).data;
+        return (await get(this.client, method)(params)).data;
       } catch (e) {
         // not found
-        if (e.code === 34) return [];
+        if (e.code === 404) return null;
 
         // rate limited
         if (e.code === 88) {
           // write this better
           // for now it just waits 20 seconds so that the rate limit
           // auto request can find something
-          this.setRateLimitOnQueue(url, moment().add(ON_RATE_LIMIT_TIMEOUT, 'milliseconds').unix());
+          this.setRateLimitOnQueue(method, moment().add(ON_RATE_LIMIT_TIMEOUT, 'milliseconds').unix());
           return;
         }
 
         throw e;
       }
     }, {
-      name: `${method.toUpperCase()} ${(url + (params ? ` ${JSON.stringify(params)}` : '')).substring(0, 100)}... }`,
+      name: `${(method + (params ? ` ${JSON.stringify(params)}` : ''))}`,
       retry,
     });
   }
 
   initRateLimitsAutoFetch() {
-    this.rateFetchTimeeout = setInterval(async () => {
+    this.rateFetchTimeout = setInterval(async () => {
       this.rateLimits = await this.getRateLimits();
     }, RATE_LIMIT_AUTO_FETCH_INTERVAL);
   }
 
   initHelpers() {
-    this.helpers = {
-      getMentions: getMentions.bind(null, this),
-      getMentionedBy: getMentionedBy.bind(null, this),
-      getFollowing: getFollowing.bind(null, this),
-      getFollowers: getFollowers.bind(null, this),
-
-      convertUserIdsToHandles: convertUserIdsToHandles.bind(null, this),
-    };
+    this.helpers = {};
   }
 
   close() {
-    clearInterval(this.rateFetchTimeeout);
+    clearInterval(this.rateFetchTimeout);
     this.progressBar.removeBar();
   }
 };
